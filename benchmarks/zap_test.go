@@ -21,8 +21,11 @@
 package benchmarks
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"sync"
 	"time"
 
 	"go.uber.org/multierr"
@@ -111,6 +114,66 @@ func newZapLogger(lvl zapcore.Level) *zap.Logger {
 	return zap.New(zapcore.NewCore(
 		enc,
 		&ztest.Discarder{},
+		lvl,
+	))
+}
+
+/*
+*
+START COPIED OFF FROM internal/ztest/writer.go
+*/
+type Syncer struct {
+	err    error
+	called bool
+}
+
+func (s *Syncer) SetError(err error) {
+	s.err = err
+}
+func (s *Syncer) Sync() error {
+	s.called = true
+	return s.err
+}
+func (s *Syncer) Called() bool {
+	return s.called
+}
+
+// A Discarder sends all writes to io.Discard.
+type PrefixDiscarder struct {
+	Syncer
+	prefix []byte
+	writer io.Writer
+	// buffer to cache the slice to not allocate memory each call
+	wrBuffer bytes.Buffer
+	mutex    sync.Mutex
+}
+
+/**
+END COPIED OFF FROM internal/ztest/writer.go
+*/
+
+// Write implements io.Writer.
+func (d *PrefixDiscarder) Write(b []byte) (int, error) {
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	d.wrBuffer.Reset()
+	d.wrBuffer.Grow(len(d.prefix) + len(b))
+	d.wrBuffer.Write(d.prefix)
+	d.wrBuffer.Write(b)
+	return io.Discard.Write(d.wrBuffer.Bytes())
+}
+
+func newZapLoggerWithPrefix(lvl zapcore.Level) *zap.Logger {
+	ec := zap.NewProductionEncoderConfig()
+	ec.EncodeDuration = zapcore.NanosDurationEncoder
+	ec.EncodeTime = zapcore.EpochNanosTimeEncoder
+	enc := zapcore.NewJSONEncoder(ec)
+	return zap.New(zapcore.NewCore(
+		enc,
+		&PrefixDiscarder{
+			prefix: []byte("[testy]" + " "),
+			writer: io.Discard,
+		},
 		lvl,
 	))
 }
